@@ -3,7 +3,7 @@ import os
 import re
 import time
 import argparse
-from subprocess import TimeoutExpired, check_output, Popen, PIPE, STDOUT
+from subprocess import TimeoutExpired, check_output, Popen, PIPE, STDOUT, DEVNULL
 from tempfile import mkdtemp
 from contextlib import contextmanager
 
@@ -22,7 +22,7 @@ parser.add_argument('--speed', nargs='+', default=[30, 99], type=float, help='Th
 parser.add_argument('--hyst', nargs='?', default=2, type=float, help='The hysteresis gap. Large gaps will reduce how often the fan speed is changed, but might mean the fan runs faster than necessary')
 parser.add_argument('--kill', action='store_true', default=False, help='Whether to kill existing Xorg sessions')
 parser.add_argument('--verbose', action='store_true', default=False, help='Whether to print extra debugging information')
-parser.add_argument('--debug', action='store_true', default=False, help='Whether to only start the Xorg subprocesses, and not actually alter the fan speed. This can be useful for debugging.')
+parser.add_argument("--display", type=str, default=":0")
 args = parser.parse_args()
 
 T_HYST =  args.hyst
@@ -30,55 +30,6 @@ T_HYST =  args.hyst
 assert len(args.temp) == len(args.speed), 'temp and speed should have the same length'
 assert len(args.temp) >= 2, 'Please use at least two points for temp'
 assert len(args.speed) >= 2, 'Please use at least two points for speed'
-
-# EDID for an arbitrary display
-EDID = b'\x00\xff\xff\xff\xff\xff\xff\x00\x10\xac\x15\xf0LTA5.\x13\x01\x03\x804 x\xee\x1e\xc5\xaeO4\xb1&\x0ePT\xa5K\x00\x81\x80\xa9@\xd1\x00qO\x01\x01\x01\x01\x01\x01\x01\x01(<\x80\xa0p\xb0#@0 6\x00\x06D!\x00\x00\x1a\x00\x00\x00\xff\x00C592M9B95ATL\n\x00\x00\x00\xfc\x00DELL U2410\n  \x00\x00\x00\xfd\x008L\x1eQ\x11\x00\n      \x00\x1d'
-
-# X conf for a single screen server with fake CRT attached
-XORG_CONF = """Section "ServerLayout"
-    Identifier     "Layout0"
-    Screen      0  "Screen0"     0    0
-EndSection
-
-Section "Screen"
-    Identifier     "Screen0"
-    Device         "VideoCard0"
-    Monitor        "Monitor0"
-    DefaultDepth   8
-    Option         "UseDisplayDevice" "DFP-0"
-    Option         "ConnectedMonitor" "DFP-0"
-    Option         "CustomEDID" "DFP-0:{edid}"
-    Option         "Coolbits" "20"
-    SubSection "Display"
-                Depth   8
-                Modes   "160x200"
-    EndSubSection
-EndSection
-
-Section "ServerFlags"
-    Option         "AllowEmptyInput" "on"
-    Option         "Xinerama"        "off"
-    Option         "SELinux"         "off"
-EndSection
-
-Section "Device"
-    Identifier  "Videocard0"
-    Driver      "nvidia"
-        Screen      0
-        Option      "UseDisplayDevice" "DFP-0"
-        Option      "ConnectedMonitor" "DFP-0"
-        Option      "CustomEDID" "DFP-0:{edid}"
-        Option      "Coolbits" "29"
-        BusID       "PCI:{bus}"
-EndSection
-
-Section "Monitor"
-    Identifier      "Monitor0"
-    Vendorname      "Dummy Display"
-    Modelname       "160x200"
-    #Modelname       "1024x768"
-EndSection
-""" 
 
 def log_output(command, ok=(0,)):
     output = []
@@ -117,24 +68,21 @@ def query(bus, field):
 def temperature(bus):
     return int(query(bus, 'temperature.gpu'))
 
-def config(bus):
-    """Writes out the X server config for a GPU to a temporary directory"""
-    tempdir = mkdtemp(prefix='cool-gpu-' + bus)
-    edid = os.path.join(tempdir, 'edid.bin')
-    conf = os.path.join(tempdir, 'xorg.conf')
+def config():
+    """Writes out the X server config for all GPUs to a temporary directory"""
+    tempdir = mkdtemp(prefix='cool-gpu')
 
-    with open(edid, 'wb') as e, open(conf, 'w') as c:
-        e.write(EDID)
-        c.write(XORG_CONF.format(edid=edid, bus=decimalize(bus)))
+    conf = os.path.join(tempdir, 'xorg.conf')
+    log_output(['nvidia-xconfig', '--enable-all-gpus', '--cool-bits=4', '--allow-empty-initial-configuration', '-o', conf])
 
     return conf
 
-def xserver(display, bus):
-    """Starts the X server for a GPU under a certain display ID""" 
-    conf = config(bus)
-    xorgargs = ['Xorg', display, '-once', '-config', conf]
+def xserver():
+    """Starts the X server""" 
+    conf = config()
+    xorgargs = ['Xorg', args.display, '-once', '-config', conf]
     print('Starting xserver: '+' '.join(xorgargs))
-    p = Popen(xorgargs)
+    p = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
     if args.verbose:
         print('Started xserver')
     return p
@@ -150,7 +98,7 @@ def kill_xservers():
     if servers:
         if args.kill:
             print('Killing all running X servers, including ' + ", ".join(map(str, servers)))
-            log_output(['pkill', 'Xorg'], ok=(0, 1))
+            log_output(['pkill', '-9', 'Xorg'], ok=(0, 1))
             for _ in range(10):
                 if xserver_pids():
                     print('Awaiting X server shutdown')
@@ -166,20 +114,17 @@ def kill_xservers():
         return 
 
 @contextmanager
-def xservers(buses):
+def xservers():
     """A context manager for launching an X server for each GPU in a list. Yields the mapping from bus ID to 
     display ID, and cleans up the X servers on exit."""
     kill_xservers()
-    displays, servers = {}, {}
+    xserver_process = None
     try:
-        for d, bus in enumerate(buses):
-            displays[bus] = ':' + str(d)
-            servers[bus] = xserver(displays[bus], bus)
-        yield displays
+        xserver_process = xserver()
+        yield None
     finally:
-        for bus, server in servers.items():
-            print('Terminating xserver for display ' + displays[bus])
-            server.terminate()
+        print(f'Terminating xserver for display {args.display}.')
+        xserver_process.terminate()
 
 def determine_segment(t):
     '''Determines which piece (segment) of a user-specified piece-wise function 
@@ -220,47 +165,39 @@ def assign(display, command):
     # failing to authenticate. Here we dispose of them
     log_output(['nvidia-settings', '-a', command, '-c', display])
 
-def set_speed(display, target):
-    assign(display, '[gpu:0]/GPUFanControlState=1')
-    assign(display, '[fan:0]/GPUTargetFanSpeed='+str(int(target)))
+def set_speed(id, target):
+    assign(args.display, f'[gpu:{id}]/GPUFanControlState=1')
+    assign(args.display, f'[fan:{id}]/GPUTargetFanSpeed='+str(int(target)))
 
-def manage_fans(displays):
+def manage_fans(buses):
     """Launches an X server for each GPU, then continually loops over the GPU fans to set their speeds according
     to the GPU temperature. When interrupted, it releases the fan control back to the driver and shuts down the
     X servers"""
     try:
-        speeds = {b: 0 for b in displays}
+        speeds = [0 for _ in buses]
         while True:
-            for bus, display in displays.items():
+            start_time = time.time()
+            for id, bus in enumerate(buses):
                 temp = temperature(bus)
-                s, l, u = target_speed(speeds[bus], temp)
-                if s != speeds[bus]:
-                    print('GPU {}, {}C -> [{}%-{}%]. Setting speed to {}%'.format(display, temp, l, u, s))
-                    set_speed(display, s)
-                    speeds[bus] = s
+                s, l, u = target_speed(speeds[id], temp)
+                if s != speeds[id]:
+                    print('GPU {}, {}C -> [{}%-{}%]. Setting speed to {}%'.format(id, temp, l, u, s))
+                    set_speed(id, s)
                 else:
-                    print('GPU {}, {}C -> [{}%-{}%]. Leaving speed at {}%'.format(display, temp, l, u, s))
-            time.sleep(5)
+                    print('GPU {}, {}C -> [{}%-{}%]. Leaving speed at {}%'.format(id, temp, l, u, s))
+
+            elapsed_time = time.time() - start_time
+            if elapsed_time < 7:
+                time.sleep(7 - elapsed_time)
     finally:
-        for bus, display in displays.items():
-            assign(display, '[gpu:0]/GPUFanControlState=0')
-            print('Released fan speed control for GPU at '+display)
-
-def debug_loop(displays):
-    displays = '\n'.join(str(d) + ' - ' + str(b) for b, d in displays.items())
-    print('\n\n\nLOOPING IN DEBUG MODE. DISPLAYS ARE:\n' + displays + '\n\n\n')
-    while True:
-        print('Looping in debug mode')
-        time.sleep(5)
-
+        for id, bus in enumerate(buses):
+            assign(args.display, f'[gpu:{id}]/GPUFanControlState=0')
+            print('Released fan speed control for GPU '+ str(id))
 
 def run():
     buses = gpu_buses() 
-    with xservers(buses) as displays:
-        if args.debug:
-            debug_loop(displays)
-        else:
-            manage_fans(displays)
+    with xservers():
+        manage_fans(buses)
 
 if __name__ == '__main__':
     run()
