@@ -168,6 +168,25 @@ def assign(display, command):
 def set_speed(id, target):
     assign(args.display, f'[gpu:{id}]/GPUFanControlState=1')
     assign(args.display, f'[fan:{id}]/GPUTargetFanSpeed='+str(int(target)))
+    
+def get_valid_value_for_GPUTargetFanSpeed(buses):
+    
+    temp_range = {}
+    for id, bus in enumerate(buses):
+        output = log_output(['nvidia-settings', '-q', f"[fan:{id}]/GPUTargetFanSpeed", '-c', args.display])
+
+        match = re.search(r'are\sin\sthe\srange\s+(\d+)\s+-\s+(\d+)', output, re.DOTALL)
+        if match:
+            min_value = int(match.group(1))
+            max_value = int(match.group(2))
+            
+            temp_range[bus] = (min_value, max_value)
+        else:
+            raise Exception("Cloudn't get valid value for GPUTargetFanSpeed.")
+    return temp_range
+
+def clamp(v, m, M):
+    return min(M, max(m, v))
 
 def manage_fans(buses):
     """Launches an X server for each GPU, then continually loops over the GPU fans to set their speeds according
@@ -175,11 +194,16 @@ def manage_fans(buses):
     X servers"""
     try:
         speeds = [0 for _ in buses]
+        
+        temp_range = get_valid_value_for_GPUTargetFanSpeed(buses)
         while True:
             start_time = time.time()
             for id, bus in enumerate(buses):
                 temp = temperature(bus)
                 s, l, u = target_speed(speeds[id], temp)
+                s = clamp(s, temp_range[bus][0], temp_range[bus][1])
+                l = clamp(l, temp_range[bus][0], temp_range[bus][1])
+                u = clamp(u, temp_range[bus][0], temp_range[bus][1])
                 if s != speeds[id]:
                     print('GPU {}, {}C -> [{}%-{}%]. Setting speed to {}%'.format(id, temp, l, u, s))
                     set_speed(id, s)
