@@ -25,7 +25,11 @@ parser.add_argument('--kill', action='store_true', default=False, help='Whether 
 parser.add_argument('--verbose', action='store_true', default=False, help='Whether to print extra debugging information')
 parser.add_argument("--display", type=str, default=":0")
 parser.add_argument("--test", action='store_true', help="Run test")
+parser.add_argument("--parallel", action='store_true', help="Processing multiple GPUs in parallel. You can only use display :0 in this mode.")
 args = parser.parse_args()
+
+if args.parallel:
+    args.display = ":0"
 
 T_HYST =  args.hyst
 
@@ -53,6 +57,38 @@ def log_output(command, ok=(0,), stderr=STDOUT):
         if p.returncode not in ok:
             print('\n'.join(output))
             raise ValueError('Command crashed with return code ' + str(p.returncode) + ': ' + ' '.join(command))
+        return '\n'.join(output)
+    
+def launch_process(command, stderr=STDOUT, shell=False):
+    if args.verbose:
+        cmd_out = command
+        if not shell:
+            cmd_out = ' '.join(command)
+        print('Command launched: ' + cmd_out)
+    p = Popen(command, stdout=PIPE, stderr=stderr, shell=shell)
+    
+    return p
+
+def wait_process(process, command, ok=(0,)):
+    output = []
+    try:
+        process.wait(60)
+        for line in process.stdout:
+            output.append(line.decode().strip())
+            if args.verbose:
+                print(line.decode().strip())
+        if args.verbose:
+            print('Command finished')
+    except TimeoutExpired:
+        cmd_out = command
+        if type(cmd_out) == list:
+            cmd_out = ' '.join(command)
+        print('Command timed out: ' + cmd_out)
+        raise
+    finally:
+        if process.returncode not in ok:
+            print('\n'.join(output))
+            raise ValueError('Command crashed with return code ' + str(process.returncode) + ': ' + ' '.join(command))
         return '\n'.join(output)
 
 def decimalize(bus):
@@ -171,6 +207,11 @@ def set_speed(id, target):
     assign(args.display, f'[gpu:{id}]/GPUFanControlState=1')
     assign(args.display, f'[fan:{id}]/GPUTargetFanSpeed='+str(int(target)))
     
+def set_speed_async(id, target):
+    cmd = f'nvidia-settings -a [gpu:{id}]/GPUFanControlState=1 -c {args.display} && nvidia-settings -a [fan:{id}]/GPUTargetFanSpeed={str(int(target))} -c {args.display}'
+    process = launch_process(cmd, shell=True)
+    return process, cmd
+
 def get_valid_value_for_GPUTargetFanSpeed(buses):
     
     fan_speed_range = {}
@@ -200,6 +241,7 @@ def manage_fans(buses):
         fan_speed_range = get_valid_value_for_GPUTargetFanSpeed(buses)
         while True:
             start_time = time.time()
+            processes_commands = []
             for id, bus in enumerate(buses):
                 temp = temperature(bus)
                 s, l, u = target_speed(speeds[id], temp)
@@ -208,9 +250,16 @@ def manage_fans(buses):
                 u = clamp(u, fan_speed_range[bus][0], fan_speed_range[bus][1])
                 if s != speeds[id]:
                     print('GPU {}, {}C -> [{}%-{}%]. Setting speed to {}%'.format(id, temp, l, u, s))
-                    set_speed(id, s)
+                    if args.parallel:
+                        processes_commands.append(set_speed_async(id, s))
+                    else:
+                        set_speed(id, s)
                 else:
                     print('GPU {}, {}C -> [{}%-{}%]. Leaving speed at {}%'.format(id, temp, l, u, s))
+
+            if args.parallel:
+                for process, command in processes_commands:
+                    wait_process(process, command)
 
             elapsed_time = time.time() - start_time
             if elapsed_time < 7:
