@@ -6,6 +6,7 @@ import argparse
 from subprocess import TimeoutExpired, check_output, Popen, PIPE, STDOUT, DEVNULL
 from tempfile import mkdtemp
 from contextlib import contextmanager
+import random
 
 parser = argparse.ArgumentParser(description=r'''
 GPU fan control for Linux.
@@ -23,6 +24,7 @@ parser.add_argument('--hyst', nargs='?', default=2, type=float, help='The hyster
 parser.add_argument('--kill', action='store_true', default=False, help='Whether to kill existing Xorg sessions')
 parser.add_argument('--verbose', action='store_true', default=False, help='Whether to print extra debugging information')
 parser.add_argument("--display", type=str, default=":0")
+parser.add_argument("--test", action='store_true', help="Run test")
 args = parser.parse_args()
 
 T_HYST =  args.hyst
@@ -171,7 +173,7 @@ def set_speed(id, target):
     
 def get_valid_value_for_GPUTargetFanSpeed(buses):
     
-    temp_range = {}
+    fan_speed_range = {}
     for id, bus in enumerate(buses):
         output = log_output(['nvidia-settings', '-q', f"[fan:{id}]/GPUTargetFanSpeed", '-c', args.display])
 
@@ -180,10 +182,10 @@ def get_valid_value_for_GPUTargetFanSpeed(buses):
             min_value = int(match.group(1))
             max_value = int(match.group(2))
             
-            temp_range[bus] = (min_value, max_value)
+            fan_speed_range[bus] = (min_value, max_value)
         else:
             raise Exception("Cloudn't get valid value for GPUTargetFanSpeed.")
-    return temp_range
+    return fan_speed_range
 
 def clamp(v, m, M):
     return min(M, max(m, v))
@@ -195,15 +197,15 @@ def manage_fans(buses):
     try:
         speeds = [0 for _ in buses]
         
-        temp_range = get_valid_value_for_GPUTargetFanSpeed(buses)
+        fan_speed_range = get_valid_value_for_GPUTargetFanSpeed(buses)
         while True:
             start_time = time.time()
             for id, bus in enumerate(buses):
                 temp = temperature(bus)
                 s, l, u = target_speed(speeds[id], temp)
-                s = clamp(s, temp_range[bus][0], temp_range[bus][1])
-                l = clamp(l, temp_range[bus][0], temp_range[bus][1])
-                u = clamp(u, temp_range[bus][0], temp_range[bus][1])
+                s = clamp(s, fan_speed_range[bus][0], fan_speed_range[bus][1])
+                l = clamp(l, fan_speed_range[bus][0], fan_speed_range[bus][1])
+                u = clamp(u, fan_speed_range[bus][0], fan_speed_range[bus][1])
                 if s != speeds[id]:
                     print('GPU {}, {}C -> [{}%-{}%]. Setting speed to {}%'.format(id, temp, l, u, s))
                     set_speed(id, s)
@@ -221,7 +223,44 @@ def manage_fans(buses):
 def run():
     buses = gpu_buses() 
     with xservers():
-        manage_fans(buses)
+        if args.test:
+            test_mode()
+        else:
+            manage_fans(buses)
+
+def fetch_current_fan_speed(id):
+    return int(log_output(['nvidia-settings', '-q', f'[fan:{id}]/GPUCurrentFanSpeed', '-c', args.display, '--terse']))
+
+def test_mode():
+    buses = gpu_buses() 
+
+    # count gpus with nvidia-smi
+    output = log_output(["nvidia-smi", "-L"])
+    fans = len(output.splitlines())
+
+    assert len(buses) == fans
+
+    fan_speed_range = get_valid_value_for_GPUTargetFanSpeed(buses)
+    assert len(fan_speed_range) == fans
+    for speed_range in fan_speed_range.values():
+        assert 0 <= speed_range[0] and speed_range[0] <= 45
+        assert 75 <= speed_range[1] and speed_range[1] <= 110
+
+    id = random.choice(range(len(buses)))
+    bus = buses[id]
+    temp = temperature(bus)
+    assert 0 <= temp and temp <= 100
+    
+    s = clamp(90, fan_speed_range[bus][0], fan_speed_range[bus][1])
+
+    set_speed(id, s)
+    time.sleep(20)
+
+    current_fan_speed = fetch_current_fan_speed(id)
+
+    assert s - 10 < current_fan_speed 
+
+    assign(args.display, f'[gpu:{id}]/GPUFanControlState=0')
 
 if __name__ == '__main__':
     run()
