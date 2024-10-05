@@ -33,11 +33,11 @@ assert len(args.temp) == len(args.speed), 'temp and speed should have the same l
 assert len(args.temp) >= 2, 'Please use at least two points for temp'
 assert len(args.speed) >= 2, 'Please use at least two points for speed'
 
-def log_output(command, ok=(0,)):
+def log_output(command, ok=(0,), stderr=STDOUT):
     output = []
     if args.verbose:
         print('Command launched: ' + ' '.join(command))
-    p = Popen(command, stdout=PIPE, stderr=STDOUT)
+    p = Popen(command, stdout=PIPE, stderr=stderr)
     try:
         p.wait(60)
         for line in p.stdout:
@@ -229,7 +229,7 @@ def run():
             manage_fans(buses)
 
 def fetch_current_fan_speed(id):
-    return int(log_output(['nvidia-settings', '-q', f'[fan:{id}]/GPUCurrentFanSpeed', '-c', args.display, '--terse']))
+    return int(log_output(['nvidia-settings', '-q', f'[fan:{id}]/GPUCurrentFanSpeed', '-c', args.display, '--terse'], stderr=DEVNULL))
 
 def test_mode():
     buses = gpu_buses() 
