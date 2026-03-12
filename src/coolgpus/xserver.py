@@ -66,15 +66,39 @@ def kill_xservers(kill=False, verbose=False):
         print("No existing X servers, we're good to go")
 
 
+def is_alive(process):
+    """Check if an X server process is still running."""
+    return process is not None and process.poll() is None
+
+
 @contextmanager
 def managed_xserver(display, kill=False, verbose=False):
-    """Context manager that starts an X server and cleans up on exit."""
+    """Context manager that starts an X server and cleans up on exit.
+
+    Yields a health-check function that the main loop can call to detect
+    and recover from Xorg crashes.
+    """
     kill_xservers(kill=kill, verbose=verbose)
-    xserver_process = None
-    try:
+    xserver_process = start_xserver(display, verbose=verbose)
+
+    def check_and_restart():
+        """Returns True if Xorg is healthy. Restarts it if dead."""
+        nonlocal xserver_process
+        if is_alive(xserver_process):
+            return True
+        print("WARNING: Xorg server died. Restarting...")
         xserver_process = start_xserver(display, verbose=verbose)
-        yield None
+        time.sleep(2)  # give it a moment to initialize
+        if is_alive(xserver_process):
+            print("Xorg server restarted successfully.")
+            return True
+        else:
+            print("ERROR: Xorg server failed to restart.")
+            return False
+
+    try:
+        yield check_and_restart
     finally:
-        if xserver_process:
+        if is_alive(xserver_process):
             print(f"Terminating xserver for display {display}.")
             xserver_process.terminate()

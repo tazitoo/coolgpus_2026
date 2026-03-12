@@ -77,7 +77,7 @@ with a small hysteresis gap to reduce fan speed oscillation."""
     return args
 
 
-def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges):
+def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges, xorg_check):
     """Main fan control loop. Adjusts fan speeds based on GPU temperatures.
     If a GPU exceeds --max-temp, power limit is reduced in steps.
     Power is restored as temperature drops back below threshold."""
@@ -95,6 +95,11 @@ def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges):
         while True:
             start_time = time.time()
 
+            # Health check: make sure Xorg is still alive
+            if not xorg_check():
+                print("ERROR: Cannot recover Xorg. Exiting.")
+                break
+
             for gpu_id, fan_ids in gpu_to_fans.items():
                 bus = buses[gpu_id]
                 temp = temperature(bus, verbose=args.verbose)
@@ -109,7 +114,7 @@ def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges):
                 if s != speeds[gpu_id]:
                     print(f"GPU {gpu_id}, {temp}C -> [{lo}%-{hi}%]. Setting speed to {s}%")
                     set_fan_speed(gpu_id, fan_ids, s, args.display, verbose=args.verbose)
-                else:
+                elif args.verbose:
                     print(f"GPU {gpu_id}, {temp}C -> [{lo}%-{hi}%]. Leaving speed at {s}%")
 
                 speeds[gpu_id] = s
@@ -194,7 +199,7 @@ def main(argv=None):
     buses = gpu_buses(verbose=args.verbose)
     check_driver(verbose=args.verbose)
 
-    with managed_xserver(args.display, kill=args.kill, verbose=args.verbose):
+    with managed_xserver(args.display, kill=args.kill, verbose=args.verbose) as xorg_check:
         gpu_to_fans = discover_fan_to_gpu_map(args.display, verbose=args.verbose)
         print(f"Discovered GPU-to-fan mapping: {gpu_to_fans}")
 
@@ -204,4 +209,4 @@ def main(argv=None):
         if args.test:
             test_mode(args, buses, gpu_to_fans, fan_speed_ranges)
         else:
-            manage_fans(args, buses, gpu_to_fans, fan_speed_ranges)
+            manage_fans(args, buses, gpu_to_fans, fan_speed_ranges, xorg_check)
