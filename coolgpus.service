@@ -1,0 +1,15 @@
+[Unit]
+Description=Headless GPU Fan Control
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/coolgpus --kill
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
