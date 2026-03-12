@@ -28,9 +28,10 @@ def generate_xorg_config(verbose=False):
 def start_xserver(display, verbose=False):
     """Start an X server on the given display."""
     conf = generate_xorg_config(verbose=verbose)
-    xorgargs = ["Xorg", display, "-once", "-config", conf]
+    xorgargs = ["Xorg", display, "-once", "-ac", "-config", conf]
     print("Starting xserver: " + " ".join(xorgargs))
     p = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
+    time.sleep(2)  # give X server time to initialize
     if verbose:
         print("Started xserver")
     return p
