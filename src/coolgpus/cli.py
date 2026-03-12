@@ -9,9 +9,11 @@ from coolgpus.nvidia import (
     driver_version,
     fetch_current_fan_speed,
     get_fan_speed_ranges,
+    get_power_limits,
     gpu_buses,
     release_fan_control,
     set_fan_speed,
+    set_power_limit,
     temperature,
 )
 from coolgpus.xserver import managed_xserver
@@ -61,6 +63,10 @@ with a small hysteresis gap to reduce fan speed oscillation."""
     parser.add_argument("--kill", action=argparse.BooleanOptionalAction, default=True, help="Kill existing Xorg sessions before starting")
     parser.add_argument("--verbose", action="store_true", default=False, help="Print extra debugging information")
     parser.add_argument("--display", type=str, default=":0", help="X server display to use (default: :0)")
+    parser.add_argument("--max-temp", type=float, default=75,
+        help="Temperature ceiling in celsius. If exceeded, power limit is reduced (default: 75)")
+    parser.add_argument("--power-step", type=float, default=25,
+        help="Watts to reduce power limit per step when over max-temp (default: 25)")
     parser.add_argument("--test", action="store_true", help="Run hardware test mode")
     args = parser.parse_args(argv)
 
@@ -72,8 +78,18 @@ with a small hysteresis gap to reduce fan speed oscillation."""
 
 
 def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges):
-    """Main fan control loop. Adjusts fan speeds based on GPU temperatures."""
+    """Main fan control loop. Adjusts fan speeds based on GPU temperatures.
+    If a GPU exceeds --max-temp, power limit is reduced in steps.
+    Power is restored as temperature drops back below threshold."""
     speeds = {gpu_id: 0 for gpu_id in gpu_to_fans}
+
+    # Track power limits per GPU: {gpu_id: (default_limit, current_limit)}
+    power_state = {}
+    for gpu_id in gpu_to_fans:
+        bus = buses[gpu_id]
+        default_pl, current_pl = get_power_limits(bus, verbose=args.verbose)
+        power_state[gpu_id] = {"default": default_pl, "current": current_pl, "floor": default_pl * 0.33}
+        print(f"GPU {gpu_id} power limit: {current_pl}W (default: {default_pl}W, floor: {default_pl * 0.33:.0f}W)")
 
     try:
         while True:
@@ -98,11 +114,37 @@ def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges):
 
                 speeds[gpu_id] = s
 
+                # Thermal protection: reduce power if over max-temp
+                ps = power_state[gpu_id]
+                if temp > args.max_temp:
+                    new_pl = ps["current"] - args.power_step
+                    if new_pl >= ps["floor"]:
+                        print(f"WARNING: GPU {gpu_id} at {temp}C (>{args.max_temp}C). "
+                              f"Reducing power limit: {ps['current']:.0f}W -> {new_pl:.0f}W")
+                        set_power_limit(bus, new_pl, verbose=args.verbose)
+                        ps["current"] = new_pl
+                    else:
+                        print(f"WARNING: GPU {gpu_id} at {temp}C. Power already at floor "
+                              f"({ps['current']:.0f}W). Cannot reduce further.")
+                elif temp < args.max_temp - args.hyst and ps["current"] < ps["default"]:
+                    # Temp is safely below threshold — restore one step
+                    new_pl = min(ps["current"] + args.power_step, ps["default"])
+                    print(f"GPU {gpu_id} cooled to {temp}C. "
+                          f"Restoring power limit: {ps['current']:.0f}W -> {new_pl:.0f}W")
+                    set_power_limit(bus, new_pl, verbose=args.verbose)
+                    ps["current"] = new_pl
+
             elapsed = time.time() - start_time
             if elapsed < args.interval:
                 time.sleep(args.interval - elapsed)
     finally:
+        # Restore default power limits and release fan control
         for gpu_id in gpu_to_fans:
+            bus = buses[gpu_id]
+            ps = power_state[gpu_id]
+            if ps["current"] < ps["default"]:
+                print(f"Restoring GPU {gpu_id} power limit to {ps['default']:.0f}W")
+                set_power_limit(bus, ps["default"], verbose=args.verbose)
             release_fan_control(gpu_id, args.display, verbose=args.verbose)
             print(f"Released fan speed control for GPU {gpu_id}")
 

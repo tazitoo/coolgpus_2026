@@ -39,11 +39,26 @@ def gpu_buses(verbose=False):
 
 
 def temperature(bus, verbose=False):
-    [line] = log_output(
-        ["nvidia-smi", "--format=csv,noheader", "--query-gpu=temperature.gpu", "-i", bus],
+    """Get the hottest temperature on the GPU (max of die and VRAM).
+
+    Falls back to die-only if VRAM temp is not available (reported as
+    'N/A' or '[Not Supported]' on some cards).
+    """
+    output = log_output(
+        ["nvidia-smi", "--format=csv,noheader,nounits",
+         "--query-gpu=temperature.gpu,temperature.memory", "-i", bus],
         verbose=verbose,
-    ).splitlines()
-    return int(line)
+    )
+    parts = [p.strip() for p in output.splitlines()[0].split(",")]
+    die_temp = int(parts[0])
+    try:
+        mem_temp = int(parts[1])
+    except (ValueError, IndexError):
+        mem_temp = 0
+    temp = max(die_temp, mem_temp)
+    if verbose and mem_temp > 0:
+        print(f"  GPU die: {die_temp}C, VRAM: {mem_temp}C -> using {temp}C")
+    return temp
 
 
 def discover_fan_to_gpu_map(display, verbose=False):
@@ -120,6 +135,30 @@ def fetch_current_fan_speed(fan_id, display, verbose=False):
             verbose=verbose,
             stderr=DEVNULL,
         )
+    )
+
+
+def get_power_limits(bus, verbose=False):
+    """Get default and current power limits for a GPU in watts.
+
+    Returns (default_limit, current_limit).
+    """
+    default = log_output(
+        ["nvidia-smi", "--format=csv,noheader,nounits", "--query-gpu=power.default_limit", "-i", bus],
+        verbose=verbose,
+    ).strip()
+    current = log_output(
+        ["nvidia-smi", "--format=csv,noheader,nounits", "--query-gpu=power.limit", "-i", bus],
+        verbose=verbose,
+    ).strip()
+    return float(default), float(current)
+
+
+def set_power_limit(bus, watts, verbose=False):
+    """Set GPU power limit in watts via nvidia-smi."""
+    log_output(
+        ["nvidia-smi", "-i", bus, "-pl", str(int(watts))],
+        verbose=verbose,
     )
 
 
