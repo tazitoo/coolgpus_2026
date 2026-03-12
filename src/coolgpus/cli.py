@@ -43,7 +43,7 @@ By default, uses a clamped linear fan curve from 30% below 55C to 99% above 80C,
 with a small hysteresis gap to reduce fan speed oscillation."""
     )
     parser.add_argument(
-        "--temp", nargs="+", default=[55, 80], type=float,
+        "--temp", nargs="+", default=[40, 80], type=float,
         help="Temperature thresholds for piecewise linear fan curve",
     )
     parser.add_argument(
@@ -58,7 +58,7 @@ with a small hysteresis gap to reduce fan speed oscillation."""
         "--interval", type=float, default=7,
         help="Seconds between fan speed updates (default: 7)",
     )
-    parser.add_argument("--kill", action="store_true", default=False, help="Kill existing Xorg sessions before starting")
+    parser.add_argument("--kill", action=argparse.BooleanOptionalAction, default=True, help="Kill existing Xorg sessions before starting")
     parser.add_argument("--verbose", action="store_true", default=False, help="Print extra debugging information")
     parser.add_argument("--display", type=str, default=":0", help="X server display to use (default: :0)")
     parser.add_argument("--test", action="store_true", help="Run hardware test mode")
