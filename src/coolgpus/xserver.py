@@ -1,7 +1,7 @@
 import os
 import time
 from contextlib import contextmanager
-from subprocess import DEVNULL, Popen
+from subprocess import DEVNULL, PIPE, Popen
 from tempfile import mkdtemp
 
 from coolgpus.nvidia import log_output
@@ -25,10 +25,31 @@ def generate_xorg_config(verbose=False):
     return conf
 
 
+def generate_xauth(display, verbose=False):
+    """Generate an xauth cookie for the given display."""
+    tempdir = mkdtemp(prefix="cool-gpu")
+    xauth_file = os.path.join(tempdir, "Xauthority")
+    # Generate a random cookie
+    mcookie = Popen(["mcookie"], stdout=PIPE)
+    cookie = mcookie.communicate()[0].decode().strip()
+    # Add it to the xauth file
+    display_name = display.lstrip(":")
+    log_output(
+        ["xauth", "-f", xauth_file, "add", f":{display_name}", ".", cookie],
+        verbose=verbose,
+    )
+    if verbose:
+        print(f"Generated xauth file: {xauth_file}")
+    return xauth_file
+
+
 def start_xserver(display, verbose=False):
-    """Start an X server on the given display."""
+    """Start an X server on the given display with xauth."""
     conf = generate_xorg_config(verbose=verbose)
-    xorgargs = ["Xorg", display, "-once", "-ac", "-config", conf]
+    xauth_file = generate_xauth(display, verbose=verbose)
+    # Set XAUTHORITY so nvidia-settings (and all subprocesses) can connect
+    os.environ["XAUTHORITY"] = xauth_file
+    xorgargs = ["Xorg", display, "-once", "-auth", xauth_file, "-config", conf]
     print("Starting xserver: " + " ".join(xorgargs))
     p = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
     time.sleep(2)  # give X server time to initialize
