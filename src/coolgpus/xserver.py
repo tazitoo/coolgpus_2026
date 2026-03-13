@@ -73,10 +73,23 @@ def install_service(verbose=False):
     print("Service enabled. Start with: sudo systemctl start coolgpus")
 
 
+def _clean_stale_lock(display, verbose=False):
+    """Remove stale X lock files left by a previous crash."""
+    display_num = display.lstrip(":")
+    lock_file = Path(f"/tmp/.X{display_num}-lock")
+    socket_file = Path(f"/tmp/.X11-unix/X{display_num}")
+    for f in (lock_file, socket_file):
+        if f.exists():
+            if verbose:
+                print(f"Removing stale lock file: {f}")
+            f.unlink()
+
+
 def start_xserver(display, verbose=False):
     """Start an X server on the given display with no access control."""
     # Clear XAUTHORITY so nvidia-settings doesn't try to authenticate
     os.environ.pop("XAUTHORITY", None)
+    _clean_stale_lock(display, verbose=verbose)
     xorgargs = ["Xorg", display, "-once", "-ac"]
     print("Starting xserver: " + " ".join(xorgargs))
     p = Popen(xorgargs)
