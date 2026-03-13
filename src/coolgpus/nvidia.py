@@ -72,7 +72,10 @@ def discover_fan_to_gpu_map(display, verbose=False):
         verbose=verbose,
     )
     fan_indices = [int(m) for m in re.findall(r"\[fan:(\d+)\]", output)]
+    if not fan_indices:
+        return {}
 
+    # Try to map each fan to its GPU via GPUCurrentFanSpeed output
     gpu_to_fans = {}
     for fan_id in fan_indices:
         fan_output = log_output(
@@ -85,6 +88,24 @@ def discover_fan_to_gpu_map(display, verbose=False):
             gpu_id = int(gpu_match.group(1))
             gpu_to_fans.setdefault(gpu_id, []).append(fan_id)
 
+    if gpu_to_fans:
+        return gpu_to_fans
+
+    # Fallback: nvidia-settings didn't include [gpu:N] in output.
+    # Count GPUs and distribute fans evenly.
+    n_gpus = int(log_output(
+        ["nvidia-smi", "--format=csv,noheader", "--query-gpu=count"],
+        verbose=verbose,
+    ).splitlines()[0].strip())
+    fans_per_gpu = len(fan_indices) // n_gpus
+    for i in range(n_gpus):
+        start = i * fans_per_gpu
+        gpu_to_fans[i] = fan_indices[start:start + fans_per_gpu]
+    # Any remaining fans go to the last GPU
+    remainder = fan_indices[n_gpus * fans_per_gpu:]
+    if remainder:
+        gpu_to_fans[n_gpus - 1].extend(remainder)
+    print(f"Using estimated fan mapping ({fans_per_gpu} fans per GPU)")
     return gpu_to_fans
 
 
