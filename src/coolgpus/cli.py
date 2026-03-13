@@ -51,7 +51,7 @@ with a small hysteresis gap to reduce fan speed oscillation."""
         help="Temperature thresholds for piecewise linear fan curve",
     )
     parser.add_argument(
-        "--speed", nargs="+", default=[30, 99], type=float,
+        "--speed", nargs="+", default=[70, 99], type=float,
         help="Fan speed percentages corresponding to each temperature threshold",
     )
     parser.add_argument(
