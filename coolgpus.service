@@ -5,7 +5,8 @@ Wants=nvidia-persistenced.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/coolgpus --kill
+Environment="PATH=/home/brian/anaconda3/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/brian/anaconda3/bin/coolgpus --kill
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGINT
