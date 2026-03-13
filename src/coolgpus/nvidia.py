@@ -62,49 +62,17 @@ def temperature(bus, verbose=False):
 
 
 def discover_fans(display, verbose=False):
-    """Discover fans on this display and probe which ones respond.
+    """Get all fan indices visible on this display.
 
-    Returns all fan indices reported by nvidia-settings. Logs warnings
-    for any fans that don't report RPM after a test spin.
+    Returns all fan indices. Fan indices are global, but only the fans
+    belonging to this display's GPU will respond to speed commands —
+    the rest are harmlessly ignored.
     """
-    import time
-
     output = log_output(
         ["nvidia-settings", "-q", "fans", "-c", display],
         verbose=verbose,
     )
-    all_fans = [int(m) for m in re.findall(r"\[fan:(\d+)\]", output)]
-    if not all_fans:
-        return []
-
-    # Probe: enable fan control, set a test speed, check RPM
-    log_output(
-        ["nvidia-settings", "-a", "[gpu:0]/GPUFanControlState=1", "-c", display],
-        verbose=verbose,
-    )
-    for fan_id in all_fans:
-        log_output(
-            ["nvidia-settings", "-a", f"[fan:{fan_id}]/GPUTargetFanSpeed=40", "-c", display],
-            verbose=verbose,
-        )
-    time.sleep(5)  # give fans time to spin up
-
-    for fan_id in all_fans:
-        rpm_str = log_output(
-            ["nvidia-settings", "-q", f"[fan:{fan_id}]/GPUCurrentFanSpeedRPM", "-c", display, "--terse"],
-            verbose=verbose,
-            stderr=DEVNULL,
-        ).strip()
-        try:
-            rpm = int(rpm_str)
-        except ValueError:
-            rpm = 0
-        if rpm > 0:
-            print(f"  fan:{fan_id} OK ({rpm} RPM)")
-        else:
-            print(f"  WARNING: fan:{fan_id} not responding (0 RPM)")
-
-    return all_fans
+    return [int(m) for m in re.findall(r"\[fan:(\d+)\]", output)]
 
 
 def get_fan_speed_ranges(fan_indices, display, verbose=False):
