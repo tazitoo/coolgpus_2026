@@ -146,13 +146,16 @@ def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges, xorg_check):
     finally:
         # Restore default power limits and release fan control
         for gpu_id in gpu_to_fans:
-            bus = buses[gpu_id]
-            ps = power_state[gpu_id]
-            if ps["current"] < ps["default"]:
-                print(f"Restoring GPU {gpu_id} power limit to {ps['default']:.0f}W")
-                set_power_limit(bus, ps["default"], verbose=args.verbose)
-            release_fan_control(gpu_id, args.display, verbose=args.verbose)
-            print(f"Released fan speed control for GPU {gpu_id}")
+            try:
+                bus = buses[gpu_id]
+                ps = power_state[gpu_id]
+                if ps["current"] < ps["default"]:
+                    print(f"Restoring GPU {gpu_id} power limit to {ps['default']:.0f}W")
+                    set_power_limit(bus, ps["default"], verbose=args.verbose)
+                release_fan_control(gpu_id, args.display, verbose=args.verbose)
+                print(f"Released fan speed control for GPU {gpu_id}")
+            except Exception as e:
+                print(f"Cleanup error for GPU {gpu_id} (Xorg may be gone): {e}")
 
 
 def test_mode(args, buses, gpu_to_fans, fan_speed_ranges):
@@ -189,6 +192,10 @@ def test_mode(args, buses, gpu_to_fans, fan_speed_ranges):
 
 
 def main(argv=None):
+    # Ensure print output appears immediately in systemd journal
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+
     args = parse_args(argv)
 
     def signal_handler(signum, frame):
