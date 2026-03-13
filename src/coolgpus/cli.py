@@ -16,7 +16,7 @@ from coolgpus.nvidia import (
     set_power_limit,
     temperature,
 )
-from coolgpus.xserver import managed_xserver
+from coolgpus.xserver import configure_xorg, managed_xserver
 
 KNOWN_PROBLEMATIC_DRIVERS = {
     "560.35.03": "XNVCtrl fan control may not work (BadValue errors)",
@@ -67,6 +67,7 @@ with a small hysteresis gap to reduce fan speed oscillation."""
         help="Temperature ceiling in celsius. If exceeded, power limit is reduced (default: 75)")
     parser.add_argument("--power-step", type=float, default=25,
         help="Watts to reduce power limit per step when over max-temp (default: 25)")
+    parser.add_argument("--setup", action="store_true", help="Write /etc/X11/xorg.conf with cool-bits enabled (requires root, run once)")
     parser.add_argument("--test", action="store_true", help="Run hardware test mode")
     args = parser.parse_args(argv)
 
@@ -198,6 +199,10 @@ def main(argv=None):
 
     buses = gpu_buses(verbose=args.verbose)
     check_driver(verbose=args.verbose)
+
+    if args.setup:
+        configure_xorg(verbose=args.verbose)
+        return
 
     with managed_xserver(args.display, kill=args.kill, verbose=args.verbose) as xorg_check:
         gpu_to_fans = discover_fan_to_gpu_map(args.display, verbose=args.verbose)

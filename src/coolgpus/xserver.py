@@ -2,35 +2,32 @@ import os
 import time
 from contextlib import contextmanager
 from subprocess import DEVNULL, Popen
-from tempfile import mkdtemp
 
 from coolgpus.nvidia import log_output
 
 
-def generate_xorg_config(verbose=False):
-    """Generate X server config with cool-bits enabled for fan control."""
-    tempdir = mkdtemp(prefix="cool-gpu")
-    conf = os.path.join(tempdir, "xorg.conf")
+def configure_xorg(verbose=False):
+    """Update /etc/X11/xorg.conf with cool-bits enabled for fan control.
+
+    Requires root. Only needs to be run once (or after driver updates).
+    """
     log_output(
         [
             "nvidia-xconfig",
             "--enable-all-gpus",
             "--cool-bits=4",
             "--allow-empty-initial-configuration",
-            "-o",
-            conf,
         ],
         verbose=verbose,
     )
-    return conf
+    print("Updated /etc/X11/xorg.conf with cool-bits=4 for all GPUs.")
 
 
 def start_xserver(display, verbose=False):
     """Start an X server on the given display with no access control."""
-    conf = generate_xorg_config(verbose=verbose)
     # Clear XAUTHORITY so nvidia-settings doesn't try to authenticate
     os.environ.pop("XAUTHORITY", None)
-    xorgargs = ["Xorg", display, "-once", "-ac", "-config", conf]
+    xorgargs = ["Xorg", display, "-once", "-ac"]
     print("Starting xserver: " + " ".join(xorgargs))
     p = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
     time.sleep(2)  # give X server time to initialize

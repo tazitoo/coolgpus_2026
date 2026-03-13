@@ -20,6 +20,23 @@ The tool automatically discovers which fans belong to which GPU, so multi-fan GP
 ### Instructions
 ```
 pip install coolgpus
+```
+
+#### First-time setup
+Run once after install (or after driver updates) to configure Xorg for fan control:
+```
+sudo $(which coolgpus) --setup
+```
+This writes cool-bits=4 to `/etc/X11/xorg.conf`, which is required for `nvidia-settings` fan control. It persists across reboots.
+
+#### Quick test
+```
+sudo $(which coolgpus) --test --verbose
+```
+This discovers your GPUs and fans, sets a test fan speed, verifies it took effect, then cleans up.
+
+#### Running
+```
 sudo $(which coolgpus) --speed 99 99
 ```
 If you hear your server take off, it works! Now interrupt it and re-run either with Sensible Defaults (TM),
@@ -86,6 +103,8 @@ Not all NVIDIA drivers play nice with fan control. Known problem drivers:
 If you're hitting weird issues, check your driver version with `nvidia-smi` and consider up/downgrading. Driver 550.x has been solid in our testing.
 
 ### Troubleshooting
+* **Xwayland on :0**: If your server has a graphical desktop, Xwayland may already occupy display `:0`. Either switch to headless mode (`sudo systemctl set-default multi-user.target && sudo reboot`) or use `--display :1` to pick a different display.
+* **Xorg wrapper permissions**: On Ubuntu 24.04+, if Xorg fails with "no screens found" or ignores cool-bits, add `needs_root_rights=yes` to `/etc/X11/Xwrapper.config`.
 * You've got a display attached: it probably won't work, but see [this issue](https://github.com/tazitoo/coolgpus_2026/issues/1) for progress.
 * You've got an X server hanging around for some reason: assuming you don't actually need it, run the script with `--kill`, which'll murder any existing X servers and let the script set up its own. Sometimes the OS [might automatically recreate its X servers](https://unix.stackexchange.com/questions/25668/how-to-close-x-server-to-avoid-errors-while-updating-nvidia-driver), and that's [tricky enough to handle that it's up to you to sort out](https://unix.stackexchange.com/questions/25668/how-to-close-x-server-to-avoid-errors-while-updating-nvidia-driver).
 * `coolgpus: command not found`: the pip script folder probably isn't on your PATH. On Ubuntu with the apt-get-installed pip, look in `~/.local/bin`.
