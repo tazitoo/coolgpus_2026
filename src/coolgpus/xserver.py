@@ -90,7 +90,7 @@ def start_xserver(display, verbose=False):
     # Clear XAUTHORITY so nvidia-settings doesn't try to authenticate
     os.environ.pop("XAUTHORITY", None)
     _clean_stale_lock(display, verbose=verbose)
-    xorgargs = ["Xorg", display, "-once", "-ac"]
+    xorgargs = ["Xorg", display, "-ac", "-noreset"]
     print("Starting xserver: " + " ".join(xorgargs))
     p = Popen(xorgargs)
     time.sleep(2)  # give X server time to initialize
