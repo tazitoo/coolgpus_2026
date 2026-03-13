@@ -62,7 +62,7 @@ with a small hysteresis gap to reduce fan speed oscillation."""
     )
     parser.add_argument("--kill", action=argparse.BooleanOptionalAction, default=True, help="Kill existing Xorg sessions before starting")
     parser.add_argument("--verbose", action="store_true", default=False, help="Print extra debugging information")
-    parser.add_argument("--display", type=str, default=":0", help="X server display to use (default: :0)")
+    parser.add_argument("--display", type=str, default=":1", help="X server display to use (default: :1)")
     parser.add_argument("--max-temp", type=float, default=75,
         help="Temperature ceiling in celsius. If exceeded, power limit is reduced (default: 75)")
     parser.add_argument("--power-step", type=float, default=25,
