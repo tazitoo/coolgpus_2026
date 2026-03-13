@@ -205,7 +205,16 @@ def main(argv=None):
         return
 
     with managed_xserver(args.display, kill=args.kill, verbose=args.verbose) as xorg_check:
-        gpu_to_fans = discover_fan_to_gpu_map(args.display, verbose=args.verbose)
+        # Retry fan discovery — Xorg may need a moment to be fully ready
+        gpu_to_fans = {}
+        for attempt in range(5):
+            gpu_to_fans = discover_fan_to_gpu_map(args.display, verbose=args.verbose)
+            if gpu_to_fans:
+                break
+            print(f"Fan discovery attempt {attempt + 1}/5 found no fans, retrying in 3s...")
+            time.sleep(3)
+        if not gpu_to_fans:
+            raise RuntimeError("Could not discover any GPU fans. Is xorg.conf configured with cool-bits?")
         print(f"Discovered GPU-to-fan mapping: {gpu_to_fans}")
 
         all_fan_ids = [fid for fids in gpu_to_fans.values() for fid in fids]
