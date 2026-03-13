@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -49,9 +50,11 @@ def configure_xorg(verbose=False):
 
 def install_service(verbose=False):
     """Generate and install the systemd service file using the current coolgpus path."""
-    coolgpus_path = shutil.which("coolgpus")
-    if not coolgpus_path:
-        print("WARNING: 'coolgpus' not found on PATH, skipping service install.")
+    # Use the path that was used to invoke this script, since shutil.which
+    # won't find it under sudo (root has a different PATH)
+    coolgpus_path = shutil.which("coolgpus") or str(Path(sys.argv[0]).resolve())
+    if not Path(coolgpus_path).is_file():
+        print(f"WARNING: could not find coolgpus executable, skipping service install.")
         return
 
     bin_dir = str(Path(coolgpus_path).parent)
