@@ -79,7 +79,7 @@ def start_xserver(display, verbose=False):
     os.environ.pop("XAUTHORITY", None)
     xorgargs = ["Xorg", display, "-once", "-ac"]
     print("Starting xserver: " + " ".join(xorgargs))
-    p = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
+    p = Popen(xorgargs)
     time.sleep(2)  # give X server time to initialize
     if verbose:
         print("Started xserver")
