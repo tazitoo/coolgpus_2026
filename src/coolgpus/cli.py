@@ -5,7 +5,7 @@ import time
 
 from coolgpus.core import clamp, target_speed
 from coolgpus.nvidia import (
-    discover_fan_to_gpu_map,
+    discover_fans,
     driver_version,
     fetch_current_fan_speed,
     get_fan_speed_ranges,
@@ -16,7 +16,7 @@ from coolgpus.nvidia import (
     set_power_limit,
     temperature,
 )
-from coolgpus.xserver import configure_xorg, managed_xserver
+from coolgpus.xserver import configure_xorg, managed_xservers
 
 KNOWN_PROBLEMATIC_DRIVERS = {
     "560.35.03": "XNVCtrl fan control may not work (BadValue errors)",
@@ -62,7 +62,7 @@ with a small hysteresis gap to reduce fan speed oscillation."""
     )
     parser.add_argument("--kill", action=argparse.BooleanOptionalAction, default=True, help="Kill existing Xorg sessions before starting")
     parser.add_argument("--verbose", action="store_true", default=False, help="Print extra debugging information")
-    parser.add_argument("--display", type=str, default=":8", help="X server display to use (default: :8)")
+    parser.add_argument("--base-display", type=int, default=8, help="Starting X display number (default: 8, uses 8,9,... for each GPU)")
     parser.add_argument("--max-temp", type=float, default=75,
         help="Temperature ceiling in celsius. If exceeded, power limit is reduced (default: 75)")
     parser.add_argument("--power-step", type=float, default=25,
@@ -78,64 +78,69 @@ with a small hysteresis gap to reduce fan speed oscillation."""
     return args
 
 
-def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges, xorg_check):
+def manage_fans(args, buses, gpu_fans, gpu_displays, xorg_check):
     """Main fan control loop. Adjusts fan speeds based on GPU temperatures.
-    If a GPU exceeds --max-temp, power limit is reduced in steps.
-    Power is restored as temperature drops back below threshold."""
-    speeds = {gpu_id: 0 for gpu_id in gpu_to_fans}
 
-    # Track power limits per GPU: {gpu_id: (default_limit, current_limit)}
+    gpu_fans: dict mapping gpu_index -> list of fan_indices
+    gpu_displays: dict mapping gpu_index -> display string
+    """
+    speeds = {gpu_idx: 0 for gpu_idx in gpu_fans}
+
+    fan_speed_ranges = {}
+    for gpu_idx, fan_ids in gpu_fans.items():
+        display = gpu_displays[gpu_idx]
+        fan_speed_ranges[gpu_idx] = get_fan_speed_ranges(fan_ids, display, verbose=args.verbose)
+
     power_state = {}
-    for gpu_id in gpu_to_fans:
-        bus = buses[gpu_id]
+    for gpu_idx in gpu_fans:
+        bus = buses[gpu_idx]
         default_pl, current_pl = get_power_limits(bus, verbose=args.verbose)
-        power_state[gpu_id] = {"default": default_pl, "current": current_pl, "floor": default_pl * 0.33}
-        print(f"GPU {gpu_id} power limit: {current_pl}W (default: {default_pl}W, floor: {default_pl * 0.33:.0f}W)")
+        power_state[gpu_idx] = {"default": default_pl, "current": current_pl, "floor": default_pl * 0.33}
+        print(f"GPU {gpu_idx} power limit: {current_pl}W (default: {default_pl}W, floor: {default_pl * 0.33:.0f}W)")
 
     try:
         while True:
             start_time = time.time()
 
-            # Health check: make sure Xorg is still alive
             if not xorg_check():
                 print("ERROR: Cannot recover Xorg. Exiting.")
                 break
 
-            for gpu_id, fan_ids in gpu_to_fans.items():
-                bus = buses[gpu_id]
+            for gpu_idx, fan_ids in gpu_fans.items():
+                bus = buses[gpu_idx]
+                display = gpu_displays[gpu_idx]
                 temp = temperature(bus, verbose=args.verbose)
 
-                fan_min, fan_max = fan_speed_ranges[fan_ids[0]]
+                ranges = fan_speed_ranges[gpu_idx]
+                fan_min, fan_max = ranges[fan_ids[0]]
 
-                s, lo, hi = target_speed(speeds[gpu_id], temp, args.temp, args.speed, args.hyst)
+                s, lo, hi = target_speed(speeds[gpu_idx], temp, args.temp, args.speed, args.hyst)
                 s = clamp(s, fan_min, fan_max)
                 lo = clamp(lo, fan_min, fan_max)
                 hi = clamp(hi, fan_min, fan_max)
 
-                if s != speeds[gpu_id]:
-                    print(f"GPU {gpu_id}, {temp}C -> [{lo}%-{hi}%]. Setting speed to {s}%")
-                    set_fan_speed(gpu_id, fan_ids, s, args.display, verbose=args.verbose)
+                if s != speeds[gpu_idx]:
+                    print(f"GPU {gpu_idx}, {temp}C -> [{lo}%-{hi}%]. Setting speed to {s}%")
+                    set_fan_speed(fan_ids, s, display, verbose=args.verbose)
                 elif args.verbose:
-                    print(f"GPU {gpu_id}, {temp}C -> [{lo}%-{hi}%]. Leaving speed at {s}%")
+                    print(f"GPU {gpu_idx}, {temp}C -> [{lo}%-{hi}%]. Leaving speed at {s}%")
 
-                speeds[gpu_id] = s
+                speeds[gpu_idx] = s
 
-                # Thermal protection: reduce power if over max-temp
-                ps = power_state[gpu_id]
+                ps = power_state[gpu_idx]
                 if temp > args.max_temp:
                     new_pl = ps["current"] - args.power_step
                     if new_pl >= ps["floor"]:
-                        print(f"WARNING: GPU {gpu_id} at {temp}C (>{args.max_temp}C). "
+                        print(f"WARNING: GPU {gpu_idx} at {temp}C (>{args.max_temp}C). "
                               f"Reducing power limit: {ps['current']:.0f}W -> {new_pl:.0f}W")
                         set_power_limit(bus, new_pl, verbose=args.verbose)
                         ps["current"] = new_pl
                     else:
-                        print(f"WARNING: GPU {gpu_id} at {temp}C. Power already at floor "
+                        print(f"WARNING: GPU {gpu_idx} at {temp}C. Power already at floor "
                               f"({ps['current']:.0f}W). Cannot reduce further.")
                 elif temp < args.max_temp - args.hyst and ps["current"] < ps["default"]:
-                    # Temp is safely below threshold — restore one step
                     new_pl = min(ps["current"] + args.power_step, ps["default"])
-                    print(f"GPU {gpu_id} cooled to {temp}C. "
+                    print(f"GPU {gpu_idx} cooled to {temp}C. "
                           f"Restoring power limit: {ps['current']:.0f}W -> {new_pl:.0f}W")
                     set_power_limit(bus, new_pl, verbose=args.verbose)
                     ps["current"] = new_pl
@@ -144,50 +149,49 @@ def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges, xorg_check):
             if elapsed < args.interval:
                 time.sleep(args.interval - elapsed)
     finally:
-        # Restore default power limits and release fan control
-        for gpu_id in gpu_to_fans:
+        for gpu_idx in gpu_fans:
             try:
-                bus = buses[gpu_id]
-                ps = power_state[gpu_id]
+                bus = buses[gpu_idx]
+                display = gpu_displays[gpu_idx]
+                ps = power_state[gpu_idx]
                 if ps["current"] < ps["default"]:
-                    print(f"Restoring GPU {gpu_id} power limit to {ps['default']:.0f}W")
+                    print(f"Restoring GPU {gpu_idx} power limit to {ps['default']:.0f}W")
                     set_power_limit(bus, ps["default"], verbose=args.verbose)
-                release_fan_control(gpu_id, args.display, verbose=args.verbose)
-                print(f"Released fan speed control for GPU {gpu_id}")
+                release_fan_control(display, verbose=args.verbose)
+                print(f"Released fan speed control for GPU {gpu_idx}")
             except Exception as e:
-                print(f"Cleanup error for GPU {gpu_id} (Xorg may be gone): {e}")
+                print(f"Cleanup error for GPU {gpu_idx} (Xorg may be gone): {e}")
 
 
-def test_mode(args, buses, gpu_to_fans, fan_speed_ranges):
+def test_mode(args, buses, gpu_fans, gpu_displays):
     """Run hardware validation tests."""
     import random
 
     gpu_count = len(buses)
-    assert len(gpu_to_fans) == gpu_count, f"GPU count mismatch: {len(gpu_to_fans)} vs {gpu_count}"
+    assert len(gpu_fans) == gpu_count, f"GPU count mismatch: {len(gpu_fans)} vs {gpu_count}"
 
-    for fan_id, (lo, hi) in fan_speed_ranges.items():
-        assert 0 <= lo <= 45, f"Fan {fan_id} min speed {lo} outside expected range 0-45"
-        assert 75 <= hi <= 110, f"Fan {fan_id} max speed {hi} outside expected range 75-110"
+    gpu_idx = random.choice(list(gpu_fans.keys()))
+    bus = buses[gpu_idx]
+    display = gpu_displays[gpu_idx]
+    fan_ids = gpu_fans[gpu_idx]
 
-    gpu_id = random.choice(list(gpu_to_fans.keys()))
-    bus = buses[gpu_id]
-    fan_ids = gpu_to_fans[gpu_id]
-    temp = temperature(bus, verbose=args.verbose)
-    assert 0 <= temp <= 100, f"GPU {gpu_id} temperature {temp}C outside expected range"
-
+    fan_speed_ranges = get_fan_speed_ranges(fan_ids, display, verbose=args.verbose)
     fan_min, fan_max = fan_speed_ranges[fan_ids[0]]
-    test_speed = clamp(90, fan_min, fan_max)
 
-    print(f"Setting GPU {gpu_id} fans to {test_speed}%...")
-    set_fan_speed(gpu_id, fan_ids, test_speed, args.display, verbose=args.verbose)
+    temp = temperature(bus, verbose=args.verbose)
+    assert 0 <= temp <= 100, f"GPU {gpu_idx} temperature {temp}C outside expected range"
+
+    test_speed = clamp(90, fan_min, fan_max)
+    print(f"Setting GPU {gpu_idx} fans to {test_speed}%...")
+    set_fan_speed(fan_ids, test_speed, display, verbose=args.verbose)
     time.sleep(20)
 
     for fan_id in fan_ids:
-        actual = fetch_current_fan_speed(fan_id, args.display, verbose=args.verbose)
+        actual = fetch_current_fan_speed(fan_id, display, verbose=args.verbose)
         assert actual > test_speed - 10, f"Fan {fan_id} speed {actual}% too far from target {test_speed}%"
         print(f"Fan {fan_id} verified at {actual}%")
 
-    release_fan_control(gpu_id, args.display, verbose=args.verbose)
+    release_fan_control(display, verbose=args.verbose)
     print("Test passed!")
 
 
@@ -211,23 +215,25 @@ def main(argv=None):
         configure_xorg(verbose=args.verbose)
         return
 
-    with managed_xserver(args.display, kill=args.kill, verbose=args.verbose) as xorg_check:
-        # Retry fan discovery — Xorg may need a moment to be fully ready
-        gpu_to_fans = {}
-        for attempt in range(5):
-            gpu_to_fans = discover_fan_to_gpu_map(args.display, verbose=args.verbose)
-            if gpu_to_fans:
-                break
-            print(f"Fan discovery attempt {attempt + 1}/5 found no fans, retrying in 3s...")
-            time.sleep(3)
-        if not gpu_to_fans:
-            raise RuntimeError("Could not discover any GPU fans. Is xorg.conf configured with cool-bits?")
-        print(f"Discovered GPU-to-fan mapping: {gpu_to_fans}")
+    with managed_xservers(buses, base_display=args.base_display,
+                          kill=args.kill, verbose=args.verbose) as (gpu_displays, xorg_check):
+        # Discover fans on each per-GPU Xorg server
+        gpu_fans = {}
+        for gpu_idx, display in gpu_displays.items():
+            for attempt in range(5):
+                fans = discover_fans(display, verbose=args.verbose)
+                if fans:
+                    gpu_fans[gpu_idx] = fans
+                    break
+                print(f"Fan discovery for GPU {gpu_idx} ({display}) attempt {attempt + 1}/5, retrying in 3s...")
+                time.sleep(3)
+            if gpu_idx not in gpu_fans:
+                raise RuntimeError(f"Could not discover fans for GPU {gpu_idx} on {display}")
 
-        all_fan_ids = [fid for fids in gpu_to_fans.values() for fid in fids]
-        fan_speed_ranges = get_fan_speed_ranges(all_fan_ids, args.display, verbose=args.verbose)
+        for gpu_idx, fan_ids in gpu_fans.items():
+            print(f"GPU {gpu_idx} ({buses[gpu_idx]}) on {gpu_displays[gpu_idx]}: fans {fan_ids}")
 
         if args.test:
-            test_mode(args, buses, gpu_to_fans, fan_speed_ranges)
+            test_mode(args, buses, gpu_fans, gpu_displays)
         else:
-            manage_fans(args, buses, gpu_to_fans, fan_speed_ranges, xorg_check)
+            manage_fans(args, buses, gpu_fans, gpu_displays, xorg_check)

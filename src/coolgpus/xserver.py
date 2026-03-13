@@ -1,10 +1,12 @@
 import os
+import re
 import shutil
 import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from subprocess import DEVNULL, Popen
+from tempfile import mkdtemp
 
 from coolgpus.nvidia import log_output
 
@@ -26,6 +28,49 @@ TimeoutStopSec=30
 [Install]
 WantedBy=multi-user.target
 """
+
+# Per-GPU xorg.conf template — one screen, one device, bound to a specific BusID
+XORG_CONF_TEMPLATE = """\
+Section "ServerLayout"
+    Identifier     "Layout0"
+    Screen      0  "Screen0"     0    0
+EndSection
+
+Section "Screen"
+    Identifier     "Screen0"
+    Device         "VideoCard0"
+    Monitor        "Monitor0"
+    DefaultDepth    24
+    Option         "AllowEmptyInitialConfiguration" "True"
+    Option         "Coolbits" "4"
+    SubSection "Display"
+        Depth       24
+    EndSubSection
+EndSection
+
+Section "ServerFlags"
+    Option         "AllowEmptyInput" "on"
+EndSection
+
+Section "Device"
+    Identifier  "VideoCard0"
+    Driver      "nvidia"
+    Option      "Coolbits" "4"
+    BusID       "PCI:{bus}"
+EndSection
+
+Section "Monitor"
+    Identifier      "Monitor0"
+    VendorName      "Dummy Display"
+    ModelName       "640x480"
+EndSection
+"""
+
+
+def decimalize(bus):
+    """Convert a PCI bus ID like '00000000:81:00.0' to Xorg format like '129:0:0'."""
+    # Drop the domain prefix (first 9 chars: '00000000:'), then convert hex parts
+    return ":".join(str(int(p, 16)) for p in re.split("[:.]", bus[9:]))
 
 
 def configure_xorg(verbose=False):
@@ -50,11 +95,9 @@ def configure_xorg(verbose=False):
 
 def install_service(verbose=False):
     """Generate and install the systemd service file using the current coolgpus path."""
-    # Use the path that was used to invoke this script, since shutil.which
-    # won't find it under sudo (root has a different PATH)
     coolgpus_path = shutil.which("coolgpus") or str(Path(sys.argv[0]).resolve())
     if not Path(coolgpus_path).is_file():
-        print(f"WARNING: could not find coolgpus executable, skipping service install.")
+        print("WARNING: could not find coolgpus executable, skipping service install.")
         return
 
     bin_dir = str(Path(coolgpus_path).parent)
@@ -73,6 +116,15 @@ def install_service(verbose=False):
     print("Service enabled. Start with: sudo systemctl start coolgpus")
 
 
+def _gen_gpu_config(bus):
+    """Generate a per-GPU xorg.conf in a temp directory, returns config path."""
+    tempdir = mkdtemp(prefix="coolgpus-" + bus.replace(":", "-"))
+    conf = os.path.join(tempdir, "xorg.conf")
+    with open(conf, "w") as f:
+        f.write(XORG_CONF_TEMPLATE.format(bus=decimalize(bus)))
+    return conf
+
+
 def _clean_stale_lock(display, verbose=False):
     """Remove stale X lock files left by a previous crash."""
     display_num = display.lstrip(":")
@@ -85,17 +137,17 @@ def _clean_stale_lock(display, verbose=False):
             f.unlink()
 
 
-def start_xserver(display, verbose=False):
-    """Start an X server on the given display with no access control."""
-    # Clear XAUTHORITY so nvidia-settings doesn't try to authenticate
+def start_xserver(display, bus, verbose=False):
+    """Start an X server for a single GPU on the given display."""
     os.environ.pop("XAUTHORITY", None)
     _clean_stale_lock(display, verbose=verbose)
-    xorgargs = ["Xorg", display, "-ac", "-noreset"]
-    print("Starting xserver: " + " ".join(xorgargs))
-    p = Popen(xorgargs)
-    time.sleep(2)  # give X server time to initialize
+    conf = _gen_gpu_config(bus)
+    xorgargs = ["Xorg", display, "-ac", "-noreset", "-config", conf]
+    print(f"Starting xserver for GPU {bus}: " + " ".join(xorgargs))
+    p = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
+    time.sleep(2)
     if verbose:
-        print("Started xserver")
+        print(f"Started xserver on {display} for {bus}")
     return p
 
 
@@ -135,33 +187,44 @@ def is_alive(process):
 
 
 @contextmanager
-def managed_xserver(display, kill=False, verbose=False):
-    """Context manager that starts an X server and cleans up on exit.
+def managed_xservers(buses, base_display=8, kill=False, verbose=False):
+    """Context manager that starts one X server per GPU.
 
-    Yields a health-check function that the main loop can call to detect
-    and recover from Xorg crashes.
+    Yields:
+        displays: dict mapping gpu_index -> display string (e.g. {0: ':8', 1: ':9'})
+        check_fn: health-check function that restarts dead Xorg processes
     """
     kill_xservers(kill=kill, verbose=verbose)
-    xserver_process = start_xserver(display, verbose=verbose)
+
+    processes = {}
+    displays = {}
+    for gpu_idx, bus in enumerate(buses):
+        display = f":{base_display + gpu_idx}"
+        displays[gpu_idx] = display
+        processes[gpu_idx] = start_xserver(display, bus, verbose=verbose)
 
     def check_and_restart():
-        """Returns True if Xorg is healthy. Restarts it if dead."""
-        nonlocal xserver_process
-        if is_alive(xserver_process):
-            return True
-        print("WARNING: Xorg server died. Restarting...")
-        xserver_process = start_xserver(display, verbose=verbose)
-        time.sleep(2)  # give it a moment to initialize
-        if is_alive(xserver_process):
-            print("Xorg server restarted successfully.")
-            return True
-        else:
-            print("ERROR: Xorg server failed to restart.")
-            return False
+        """Returns True if all Xorg servers are healthy. Restarts dead ones."""
+        all_ok = True
+        for gpu_idx, proc in processes.items():
+            if is_alive(proc):
+                continue
+            bus = buses[gpu_idx]
+            display = displays[gpu_idx]
+            print(f"WARNING: Xorg for GPU {gpu_idx} ({display}) died. Restarting...")
+            processes[gpu_idx] = start_xserver(display, bus, verbose=verbose)
+            time.sleep(2)
+            if is_alive(processes[gpu_idx]):
+                print(f"Xorg for GPU {gpu_idx} restarted successfully.")
+            else:
+                print(f"ERROR: Xorg for GPU {gpu_idx} failed to restart.")
+                all_ok = False
+        return all_ok
 
     try:
-        yield check_and_restart
+        yield displays, check_and_restart
     finally:
-        if is_alive(xserver_process):
-            print(f"Terminating xserver for display {display}.")
-            xserver_process.terminate()
+        for gpu_idx, proc in processes.items():
+            if is_alive(proc):
+                print(f"Terminating xserver for GPU {gpu_idx} ({displays[gpu_idx]}).")
+                proc.terminate()

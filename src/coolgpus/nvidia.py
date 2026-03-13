@@ -61,52 +61,17 @@ def temperature(bus, verbose=False):
     return temp
 
 
-def discover_fan_to_gpu_map(display, verbose=False):
-    """Query nvidia-settings to discover which fans belong to which GPU.
+def discover_fans(display, verbose=False):
+    """Query nvidia-settings on a per-GPU display to find its fans.
 
-    Returns a dict mapping gpu_index -> list of fan_indices.
-    This handles multi-fan GPUs correctly (e.g., GPU 0 has fans [0,1]).
+    Each Xorg server is bound to a single GPU, so all fans belong to gpu:0.
+    Returns list of fan indices (e.g. [0, 1]).
     """
     output = log_output(
         ["nvidia-settings", "-q", "fans", "-c", display],
         verbose=verbose,
     )
-    fan_indices = [int(m) for m in re.findall(r"\[fan:(\d+)\]", output)]
-    if not fan_indices:
-        return {}
-
-    # Try to map each fan to its GPU via GPUCurrentFanSpeed output
-    gpu_to_fans = {}
-    for fan_id in fan_indices:
-        fan_output = log_output(
-            ["nvidia-settings", "-q", f"[fan:{fan_id}]/GPUCurrentFanSpeed", "-c", display],
-            verbose=verbose,
-            stderr=DEVNULL,
-        )
-        gpu_match = re.search(r"\[gpu:(\d+)\]", fan_output)
-        if gpu_match:
-            gpu_id = int(gpu_match.group(1))
-            gpu_to_fans.setdefault(gpu_id, []).append(fan_id)
-
-    if gpu_to_fans:
-        return gpu_to_fans
-
-    # Fallback: nvidia-settings didn't include [gpu:N] in output.
-    # Count GPUs and distribute fans evenly.
-    n_gpus = int(log_output(
-        ["nvidia-smi", "--format=csv,noheader", "--query-gpu=count"],
-        verbose=verbose,
-    ).splitlines()[0].strip())
-    fans_per_gpu = len(fan_indices) // n_gpus
-    for i in range(n_gpus):
-        start = i * fans_per_gpu
-        gpu_to_fans[i] = fan_indices[start:start + fans_per_gpu]
-    # Any remaining fans go to the last GPU
-    remainder = fan_indices[n_gpus * fans_per_gpu:]
-    if remainder:
-        gpu_to_fans[n_gpus - 1].extend(remainder)
-    print(f"Using estimated fan mapping ({fans_per_gpu} fans per GPU)")
-    return gpu_to_fans
+    return [int(m) for m in re.findall(r"\[fan:(\d+)\]", output)]
 
 
 def get_fan_speed_ranges(fan_indices, display, verbose=False):
@@ -128,10 +93,13 @@ def get_fan_speed_ranges(fan_indices, display, verbose=False):
     return ranges
 
 
-def set_fan_speed(gpu_id, fan_ids, target, display, verbose=False):
-    """Enable manual fan control on a GPU and set all its fans to target speed."""
+def set_fan_speed(fan_ids, target, display, verbose=False):
+    """Enable manual fan control and set all fans to target speed.
+
+    Each display is bound to a single GPU, so we always use [gpu:0].
+    """
     log_output(
-        ["nvidia-settings", "-a", f"[gpu:{gpu_id}]/GPUFanControlState=1", "-c", display],
+        ["nvidia-settings", "-a", "[gpu:0]/GPUFanControlState=1", "-c", display],
         verbose=verbose,
     )
     for fan_id in fan_ids:
@@ -141,10 +109,10 @@ def set_fan_speed(gpu_id, fan_ids, target, display, verbose=False):
         )
 
 
-def release_fan_control(gpu_id, display, verbose=False):
-    """Return fan control to the driver for a GPU."""
+def release_fan_control(display, verbose=False):
+    """Return fan control to the driver. Each display has one GPU (gpu:0)."""
     log_output(
-        ["nvidia-settings", "-a", f"[gpu:{gpu_id}]/GPUFanControlState=0", "-c", display],
+        ["nvidia-settings", "-a", "[gpu:0]/GPUFanControlState=0", "-c", display],
         verbose=verbose,
     )
 
