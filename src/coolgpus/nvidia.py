@@ -113,6 +113,20 @@ def probe_fan_mapping(display, fan_indices, num_gpus, verbose=False):
     SETTLE_TIME = 5
     RPM_INCREASE_THRESHOLD = 500
 
+    # Zero all fans first to get a clean baseline (fans may be spinning
+    # from a previous session or manual testing)
+    for g in range(num_gpus):
+        log_output(
+            ["nvidia-settings", "-a", f"[gpu:{g}]/GPUFanControlState=1", "-c", display],
+            verbose=verbose,
+        )
+    for fan_id in fan_indices:
+        log_output(
+            ["nvidia-settings", "-a", f"[fan:{fan_id}]/GPUTargetFanSpeed=0", "-c", display],
+            verbose=verbose,
+        )
+    time.sleep(5)
+
     # Disable all fan control, get baseline RPMs
     for g in range(num_gpus):
         log_output(
