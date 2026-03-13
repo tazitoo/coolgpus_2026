@@ -188,43 +188,42 @@ def is_alive(process):
 
 @contextmanager
 def managed_xservers(buses, base_display=8, kill=False, verbose=False):
-    """Context manager that starts one X server per GPU.
+    """Context manager that starts a single shared X server for all GPUs.
+
+    Uses the system /etc/X11/xorg.conf (configured by --setup with cool-bits
+    for all GPUs) so that one Xorg instance can control fans on every GPU.
 
     Yields:
-        displays: dict mapping gpu_index -> display string (e.g. {0: ':8', 1: ':9'})
-        check_fn: health-check function that restarts dead Xorg processes
+        display: display string (e.g. ':8')
+        check_fn: health-check function that restarts dead Xorg process
     """
     kill_xservers(kill=kill, verbose=verbose)
 
-    processes = {}
-    displays = {}
-    for gpu_idx, bus in enumerate(buses):
-        display = f":{base_display + gpu_idx}"
-        displays[gpu_idx] = display
-        processes[gpu_idx] = start_xserver(display, bus, verbose=verbose)
+    display = f":{base_display}"
+    _clean_stale_lock(display, verbose=verbose)
+
+    xorgargs = ["Xorg", display, "-ac", "-noreset"]
+    print(f"Starting shared xserver: " + " ".join(xorgargs))
+    process = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
+    time.sleep(2)
 
     def check_and_restart():
-        """Returns True if all Xorg servers are healthy. Restarts dead ones."""
-        all_ok = True
-        for gpu_idx, proc in processes.items():
-            if is_alive(proc):
-                continue
-            bus = buses[gpu_idx]
-            display = displays[gpu_idx]
-            print(f"WARNING: Xorg for GPU {gpu_idx} ({display}) died. Restarting...")
-            processes[gpu_idx] = start_xserver(display, bus, verbose=verbose)
-            time.sleep(2)
-            if is_alive(processes[gpu_idx]):
-                print(f"Xorg for GPU {gpu_idx} restarted successfully.")
-            else:
-                print(f"ERROR: Xorg for GPU {gpu_idx} failed to restart.")
-                all_ok = False
-        return all_ok
+        nonlocal process
+        if is_alive(process):
+            return True
+        print(f"WARNING: Xorg ({display}) died. Restarting...")
+        _clean_stale_lock(display, verbose=verbose)
+        process = Popen(xorgargs, stdout=DEVNULL, stderr=DEVNULL)
+        time.sleep(2)
+        if is_alive(process):
+            print(f"Xorg restarted successfully.")
+            return True
+        print(f"ERROR: Xorg failed to restart.")
+        return False
 
     try:
-        yield displays, check_and_restart
+        yield display, check_and_restart
     finally:
-        for gpu_idx, proc in processes.items():
-            if is_alive(proc):
-                print(f"Terminating xserver for GPU {gpu_idx} ({displays[gpu_idx]}).")
-                proc.terminate()
+        if is_alive(process):
+            print(f"Terminating xserver ({display}).")
+            process.terminate()

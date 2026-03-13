@@ -1,4 +1,5 @@
 import re
+import time
 from subprocess import TimeoutExpired, Popen, PIPE, STDOUT, DEVNULL
 
 
@@ -75,6 +76,99 @@ def discover_fans(display, verbose=False):
     return [int(m) for m in re.findall(r"\[fan:(\d+)\]", output)]
 
 
+def build_gpu_bus_map(display, buses, verbose=False):
+    """Map nvidia-smi GPU indices to nvidia-settings gpu:N indices via PCIBus.
+
+    Returns dict of smi_idx -> ns_idx.
+    """
+    bus_to_smi = {}
+    for smi_idx, bus in enumerate(buses):
+        bus_num = int(bus[9:].split(":")[0], 16)
+        bus_to_smi[bus_num] = smi_idx
+
+    smi_to_ns = {}
+    for ns_idx in range(len(buses)):
+        pci_bus = int(log_output(
+            ["nvidia-settings", "-q", f"[gpu:{ns_idx}]/PCIBus", "-c", display, "--terse"],
+            verbose=verbose,
+            stderr=DEVNULL,
+        ))
+        if pci_bus in bus_to_smi:
+            smi_to_ns[bus_to_smi[pci_bus]] = ns_idx
+            if verbose:
+                print(f"nvidia-smi GPU {bus_to_smi[pci_bus]} -> nvidia-settings gpu:{ns_idx} (PCIBus {pci_bus})")
+
+    return smi_to_ns
+
+
+def probe_fan_mapping(display, fan_indices, num_gpus, verbose=False):
+    """Probe which fans each nvidia-settings gpu:N controls.
+
+    Enables one GPU's fan control at a time, sets all fans to max,
+    and checks which fans respond with increased RPM.
+
+    Returns dict of ns_gpu_idx -> list of fan indices.
+    """
+    PROBE_SPEED = 99
+    SETTLE_TIME = 5
+    RPM_INCREASE_THRESHOLD = 500
+
+    # Disable all fan control, get baseline RPMs
+    for g in range(num_gpus):
+        log_output(
+            ["nvidia-settings", "-a", f"[gpu:{g}]/GPUFanControlState=0", "-c", display],
+            verbose=verbose,
+        )
+    time.sleep(3)
+
+    baseline = {}
+    for fan_id in fan_indices:
+        baseline[fan_id] = int(log_output(
+            ["nvidia-settings", "-q", f"[fan:{fan_id}]/GPUCurrentFanSpeedRPM", "-c", display, "--terse"],
+            verbose=verbose,
+            stderr=DEVNULL,
+        ))
+    print(f"Fan probe baseline RPMs: {baseline}")
+
+    mapping = {}
+    for gpu_idx in range(num_gpus):
+        log_output(
+            ["nvidia-settings", "-a", f"[gpu:{gpu_idx}]/GPUFanControlState=1", "-c", display],
+            verbose=verbose,
+        )
+
+        for fan_id in fan_indices:
+            log_output(
+                ["nvidia-settings", "-a", f"[fan:{fan_id}]/GPUTargetFanSpeed={PROBE_SPEED}", "-c", display],
+                verbose=verbose,
+            )
+
+        time.sleep(SETTLE_TIME)
+
+        responding = []
+        for fan_id in fan_indices:
+            rpm = int(log_output(
+                ["nvidia-settings", "-q", f"[fan:{fan_id}]/GPUCurrentFanSpeedRPM", "-c", display, "--terse"],
+                verbose=verbose,
+                stderr=DEVNULL,
+            ))
+            if rpm - baseline.get(fan_id, 0) > RPM_INCREASE_THRESHOLD:
+                responding.append(fan_id)
+                if verbose:
+                    print(f"  fan:{fan_id}: {baseline[fan_id]} -> {rpm} RPM -> gpu:{gpu_idx}")
+
+        mapping[gpu_idx] = responding
+        print(f"nvidia-settings gpu:{gpu_idx}: fans {responding}")
+
+        log_output(
+            ["nvidia-settings", "-a", f"[gpu:{gpu_idx}]/GPUFanControlState=0", "-c", display],
+            verbose=verbose,
+        )
+        time.sleep(2)
+
+    return mapping
+
+
 def get_fan_speed_ranges(fan_indices, display, verbose=False):
     """Get valid speed range for each fan index.
 
@@ -94,13 +188,10 @@ def get_fan_speed_ranges(fan_indices, display, verbose=False):
     return ranges
 
 
-def set_fan_speed(fan_ids, target, display, verbose=False):
-    """Enable manual fan control and set all fans to target speed.
-
-    Each display is bound to a single GPU, so we always use [gpu:0].
-    """
+def set_fan_speed(fan_ids, target, display, gpu_ns_idx=0, verbose=False):
+    """Enable manual fan control and set fans to target speed."""
     log_output(
-        ["nvidia-settings", "-a", "[gpu:0]/GPUFanControlState=1", "-c", display],
+        ["nvidia-settings", "-a", f"[gpu:{gpu_ns_idx}]/GPUFanControlState=1", "-c", display],
         verbose=verbose,
     )
     for fan_id in fan_ids:
@@ -110,10 +201,10 @@ def set_fan_speed(fan_ids, target, display, verbose=False):
         )
 
 
-def release_fan_control(display, verbose=False):
-    """Return fan control to the driver. Each display has one GPU (gpu:0)."""
+def release_fan_control(display, gpu_ns_idx=0, verbose=False):
+    """Return fan control to the driver."""
     log_output(
-        ["nvidia-settings", "-a", "[gpu:0]/GPUFanControlState=0", "-c", display],
+        ["nvidia-settings", "-a", f"[gpu:{gpu_ns_idx}]/GPUFanControlState=0", "-c", display],
         verbose=verbose,
     )
 

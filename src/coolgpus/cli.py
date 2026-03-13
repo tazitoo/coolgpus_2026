@@ -5,12 +5,14 @@ import time
 
 from coolgpus.core import clamp, target_speed
 from coolgpus.nvidia import (
+    build_gpu_bus_map,
     discover_fans,
     driver_version,
     fetch_current_fan_speed,
     get_fan_speed_ranges,
     get_power_limits,
     gpu_buses,
+    probe_fan_mapping,
     release_fan_control,
     set_fan_speed,
     set_power_limit,
@@ -78,17 +80,16 @@ with a small hysteresis gap to reduce fan speed oscillation."""
     return args
 
 
-def manage_fans(args, buses, gpu_fans, gpu_displays, xorg_check):
+def manage_fans(args, buses, gpu_fans, display, gpu_ns_indices, xorg_check):
     """Main fan control loop. Adjusts fan speeds based on GPU temperatures.
 
-    gpu_fans: dict mapping gpu_index -> list of fan_indices
-    gpu_displays: dict mapping gpu_index -> display string
+    gpu_fans: dict mapping smi_gpu_index -> list of fan_indices
+    gpu_ns_indices: dict mapping smi_gpu_index -> nvidia-settings gpu:N index
     """
     speeds = {gpu_idx: 0 for gpu_idx in gpu_fans}
 
     fan_speed_ranges = {}
     for gpu_idx, fan_ids in gpu_fans.items():
-        display = gpu_displays[gpu_idx]
         fan_speed_ranges[gpu_idx] = get_fan_speed_ranges(fan_ids, display, verbose=args.verbose)
 
     power_state = {}
@@ -108,7 +109,7 @@ def manage_fans(args, buses, gpu_fans, gpu_displays, xorg_check):
 
             for gpu_idx, fan_ids in gpu_fans.items():
                 bus = buses[gpu_idx]
-                display = gpu_displays[gpu_idx]
+                ns_idx = gpu_ns_indices[gpu_idx]
                 temp = temperature(bus, verbose=args.verbose)
 
                 ranges = fan_speed_ranges[gpu_idx]
@@ -121,7 +122,7 @@ def manage_fans(args, buses, gpu_fans, gpu_displays, xorg_check):
 
                 if s != speeds[gpu_idx]:
                     print(f"GPU {gpu_idx}, {temp}C -> [{lo}%-{hi}%]. Setting speed to {s}%")
-                    set_fan_speed(fan_ids, s, display, verbose=args.verbose)
+                    set_fan_speed(fan_ids, s, display, gpu_ns_idx=ns_idx, verbose=args.verbose)
                 elif args.verbose:
                     print(f"GPU {gpu_idx}, {temp}C -> [{lo}%-{hi}%]. Leaving speed at {s}%")
 
@@ -152,27 +153,24 @@ def manage_fans(args, buses, gpu_fans, gpu_displays, xorg_check):
         for gpu_idx in gpu_fans:
             try:
                 bus = buses[gpu_idx]
-                display = gpu_displays[gpu_idx]
+                ns_idx = gpu_ns_indices[gpu_idx]
                 ps = power_state[gpu_idx]
                 if ps["current"] < ps["default"]:
                     print(f"Restoring GPU {gpu_idx} power limit to {ps['default']:.0f}W")
                     set_power_limit(bus, ps["default"], verbose=args.verbose)
-                release_fan_control(display, verbose=args.verbose)
+                release_fan_control(display, gpu_ns_idx=ns_idx, verbose=args.verbose)
                 print(f"Released fan speed control for GPU {gpu_idx}")
             except Exception as e:
                 print(f"Cleanup error for GPU {gpu_idx} (Xorg may be gone): {e}")
 
 
-def test_mode(args, buses, gpu_fans, gpu_displays):
+def test_mode(args, buses, gpu_fans, display, gpu_ns_indices):
     """Run hardware validation tests."""
     import random
 
-    gpu_count = len(buses)
-    assert len(gpu_fans) == gpu_count, f"GPU count mismatch: {len(gpu_fans)} vs {gpu_count}"
-
     gpu_idx = random.choice(list(gpu_fans.keys()))
     bus = buses[gpu_idx]
-    display = gpu_displays[gpu_idx]
+    ns_idx = gpu_ns_indices[gpu_idx]
     fan_ids = gpu_fans[gpu_idx]
 
     fan_speed_ranges = get_fan_speed_ranges(fan_ids, display, verbose=args.verbose)
@@ -183,7 +181,7 @@ def test_mode(args, buses, gpu_fans, gpu_displays):
 
     test_speed = clamp(90, fan_min, fan_max)
     print(f"Setting GPU {gpu_idx} fans to {test_speed}%...")
-    set_fan_speed(fan_ids, test_speed, display, verbose=args.verbose)
+    set_fan_speed(fan_ids, test_speed, display, gpu_ns_idx=ns_idx, verbose=args.verbose)
     time.sleep(20)
 
     for fan_id in fan_ids:
@@ -191,7 +189,7 @@ def test_mode(args, buses, gpu_fans, gpu_displays):
         assert actual > test_speed - 10, f"Fan {fan_id} speed {actual}% too far from target {test_speed}%"
         print(f"Fan {fan_id} verified at {actual}%")
 
-    release_fan_control(display, verbose=args.verbose)
+    release_fan_control(display, gpu_ns_idx=ns_idx, verbose=args.verbose)
     print("Test passed!")
 
 
@@ -216,24 +214,40 @@ def main(argv=None):
         return
 
     with managed_xservers(buses, base_display=args.base_display,
-                          kill=args.kill, verbose=args.verbose) as (gpu_displays, xorg_check):
-        # Discover fans on each per-GPU Xorg server
-        gpu_fans = {}
-        for gpu_idx, display in gpu_displays.items():
-            for attempt in range(5):
-                fans = discover_fans(display, verbose=args.verbose)
-                if fans:
-                    gpu_fans[gpu_idx] = fans
-                    break
-                print(f"Fan discovery for GPU {gpu_idx} ({display}) attempt {attempt + 1}/5, retrying in 3s...")
-                time.sleep(3)
-            if gpu_idx not in gpu_fans:
-                raise RuntimeError(f"Could not discover fans for GPU {gpu_idx} on {display}")
+                          kill=args.kill, verbose=args.verbose) as (display, xorg_check):
+        # Discover all fans on the shared Xorg
+        all_fans = None
+        for attempt in range(5):
+            all_fans = discover_fans(display, verbose=args.verbose)
+            if all_fans:
+                break
+            print(f"Fan discovery attempt {attempt + 1}/5, retrying in 3s...")
+            time.sleep(3)
+        if not all_fans:
+            raise RuntimeError("Could not discover any fans")
+        print(f"Discovered fans: {all_fans}")
 
-        for gpu_idx, fan_ids in gpu_fans.items():
-            print(f"GPU {gpu_idx} ({buses[gpu_idx]}) on {gpu_displays[gpu_idx]}: fans {fan_ids}")
+        # Map nvidia-smi GPU indices to nvidia-settings gpu:N indices
+        gpu_bus_map = build_gpu_bus_map(display, buses, verbose=args.verbose)
+        for smi_idx, ns_idx in gpu_bus_map.items():
+            print(f"GPU {smi_idx} ({buses[smi_idx]}) -> nvidia-settings gpu:{ns_idx}")
+
+        # Probe which fans each GPU controls
+        ns_fan_map = probe_fan_mapping(display, all_fans, len(buses), verbose=args.verbose)
+
+        # Build fan mapping keyed by nvidia-smi index
+        gpu_fans = {}
+        gpu_ns_indices = {}
+        for smi_idx, ns_idx in gpu_bus_map.items():
+            fans = ns_fan_map.get(ns_idx, [])
+            if fans:
+                gpu_fans[smi_idx] = fans
+                gpu_ns_indices[smi_idx] = ns_idx
+                print(f"GPU {smi_idx} ({buses[smi_idx]}): fans {fans}")
+            else:
+                print(f"WARNING: GPU {smi_idx} ({buses[smi_idx]}): no controllable fans found")
 
         if args.test:
-            test_mode(args, buses, gpu_fans, gpu_displays)
+            test_mode(args, buses, gpu_fans, display, gpu_ns_indices)
         else:
-            manage_fans(args, buses, gpu_fans, gpu_displays, xorg_check)
+            manage_fans(args, buses, gpu_fans, display, gpu_ns_indices, xorg_check)
