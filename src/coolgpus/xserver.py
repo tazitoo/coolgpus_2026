@@ -1,13 +1,35 @@
 import os
+import shutil
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from subprocess import DEVNULL, Popen
 
 from coolgpus.nvidia import log_output
 
+SERVICE_TEMPLATE = """\
+[Unit]
+Description=Headless GPU Fan Control
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+Environment="PATH={bin_dir}:/usr/local/bin:/usr/bin:/bin"
+ExecStart={coolgpus_path} --kill
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+"""
+
 
 def configure_xorg(verbose=False):
-    """Update /etc/X11/xorg.conf with cool-bits enabled for fan control.
+    """Update /etc/X11/xorg.conf with cool-bits enabled for fan control,
+    and install the systemd service.
 
     Requires root. Only needs to be run once (or after driver updates).
     """
@@ -21,6 +43,31 @@ def configure_xorg(verbose=False):
         verbose=verbose,
     )
     print("Updated /etc/X11/xorg.conf with cool-bits=4 for all GPUs.")
+
+    install_service(verbose=verbose)
+
+
+def install_service(verbose=False):
+    """Generate and install the systemd service file using the current coolgpus path."""
+    coolgpus_path = shutil.which("coolgpus")
+    if not coolgpus_path:
+        print("WARNING: 'coolgpus' not found on PATH, skipping service install.")
+        return
+
+    bin_dir = str(Path(coolgpus_path).parent)
+    service_content = SERVICE_TEMPLATE.format(
+        bin_dir=bin_dir,
+        coolgpus_path=coolgpus_path,
+    )
+
+    service_path = Path("/etc/systemd/system/coolgpus.service")
+    service_path.write_text(service_content)
+    print(f"Installed systemd service to {service_path}")
+    print(f"  Using executable: {coolgpus_path}")
+
+    log_output(["systemctl", "daemon-reload"], verbose=verbose)
+    log_output(["systemctl", "enable", "coolgpus"], verbose=verbose)
+    print("Service enabled. Start with: sudo systemctl start coolgpus")
 
 
 def start_xserver(display, verbose=False):
