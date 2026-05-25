@@ -95,7 +95,7 @@ def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges):
             for gpu_id, fan_ids in gpu_to_fans.items():
                 temp = temperature(gpu_id, verbose=args.verbose)
 
-                fan_min, fan_max = fan_speed_ranges[fan_ids[0]]
+                fan_min, fan_max = fan_speed_ranges[gpu_id]
 
                 s, lo, hi = target_speed(speeds[gpu_id], temp, args.temp, args.speed, args.hyst)
                 s = clamp(s, fan_min, fan_max)
@@ -151,16 +151,16 @@ def test_mode(args, buses, gpu_to_fans, fan_speed_ranges):
     n_gpus = len(buses)
     assert len(gpu_to_fans) == n_gpus, f"GPU count mismatch: {len(gpu_to_fans)} vs {n_gpus}"
 
-    for fan_id, (lo, hi) in fan_speed_ranges.items():
-        assert 0 <= lo <= 45, f"Fan {fan_id} min speed {lo} outside expected range 0-45"
-        assert 75 <= hi <= 110, f"Fan {fan_id} max speed {hi} outside expected range 75-110"
+    for gid, (lo, hi) in fan_speed_ranges.items():
+        assert 0 <= lo <= 45, f"GPU {gid} min fan speed {lo} outside expected range 0-45"
+        assert 75 <= hi <= 110, f"GPU {gid} max fan speed {hi} outside expected range 75-110"
 
     gpu_id = random.choice(list(gpu_to_fans.keys()))
     fan_ids = gpu_to_fans[gpu_id]
     temp = temperature(gpu_id, verbose=args.verbose)
     assert 0 <= temp <= 100, f"GPU {gpu_id} temperature {temp}C outside expected range"
 
-    fan_min, fan_max = fan_speed_ranges[fan_ids[0]]
+    fan_min, fan_max = fan_speed_ranges[gpu_id]
     test_speed = clamp(90, fan_min, fan_max)
 
     print(f"Setting GPU {gpu_id} fans to {test_speed}%...")
@@ -185,9 +185,8 @@ def main(argv=None):
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    check_driver(verbose=args.verbose)
-
     with nvml_context():
+        check_driver(verbose=args.verbose)
         n = gpu_count(verbose=args.verbose)
         buses = list(range(n))
 

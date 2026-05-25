@@ -54,23 +54,22 @@ def discover_fan_to_gpu_map(verbose=False):
 
 
 def get_fan_speed_ranges(gpu_to_fans, verbose=False):
-    """Return valid speed range for each fan index as {fan_id: (min%, max%)}.
+    """Return valid speed range per GPU as {gpu_id: (min%, max%)}.
 
     Tries nvmlDeviceGetMinMaxFanSpeed (driver >= 520); falls back to (0, 100).
     """
     ranges = {}
-    for gpu_id, fan_ids in gpu_to_fans.items():
+    for gpu_id in gpu_to_fans:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
-        for fan_id in fan_ids:
-            try:
-                lo, hi = pynvml.nvmlDeviceGetMinMaxFanSpeed(handle)
-            except pynvml.NVMLError:
-                lo, hi = 0, 100
-                if verbose:
-                    print(f"  Fan {fan_id}: min/max not available, using 0-100%")
-            ranges[fan_id] = (lo, hi)
+        try:
+            lo, hi = pynvml.nvmlDeviceGetMinMaxFanSpeed(handle)
+        except pynvml.NVMLError:
+            lo, hi = 0, 100
             if verbose:
-                print(f"  Fan {fan_id} range: {lo}-{hi}%")
+                print(f"  GPU {gpu_id}: min/max fan speed not available, using 0-100%")
+        ranges[gpu_id] = (lo, hi)
+        if verbose:
+            print(f"  GPU {gpu_id} fan range: {lo}-{hi}%")
     return ranges
 
 
