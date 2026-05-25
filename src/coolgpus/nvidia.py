@@ -77,6 +77,10 @@ def set_fan_speed(gpu_id, fan_ids, target, verbose=False):
     """Set all fans on a GPU to target speed (percent)."""
     handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
     for fan_id in fan_ids:
+        try:
+            pynvml.nvmlDeviceSetFanControlPolicy(handle, fan_id, pynvml.NVML_FAN_POLICY_MANUAL)
+        except (pynvml.NVMLError, AttributeError):
+            pass  # older drivers don't expose this; SetFanSpeed_v2 may suffice
         pynvml.nvmlDeviceSetFanSpeed_v2(handle, fan_id, int(target))
     if verbose:
         print(f"  GPU {gpu_id} fans {fan_ids} -> {int(target)}%")
