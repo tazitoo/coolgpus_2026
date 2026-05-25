@@ -148,8 +148,8 @@ def test_mode(args, buses, gpu_to_fans, fan_speed_ranges):
     """Run hardware validation tests."""
     import random
 
-    gpu_count = len(buses)
-    assert len(gpu_to_fans) == gpu_count, f"GPU count mismatch: {len(gpu_to_fans)} vs {gpu_count}"
+    n_gpus = len(buses)
+    assert len(gpu_to_fans) == n_gpus, f"GPU count mismatch: {len(gpu_to_fans)} vs {n_gpus}"
 
     for fan_id, (lo, hi) in fan_speed_ranges.items():
         assert 0 <= lo <= 45, f"Fan {fan_id} min speed {lo} outside expected range 0-45"
