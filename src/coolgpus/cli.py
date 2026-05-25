@@ -122,24 +122,12 @@ def manage_fans(args, buses, gpu_to_fans, fan_speed_ranges):
                     else:
                         print(f"WARNING: GPU {gpu_id} at {temp}C. Power already at floor "
                               f"({ps['current']:.0f}W). Cannot reduce further.")
-                elif temp < args.max_temp - args.hyst and ps["current"] < ps["default"]:
-                    # Temp is safely below threshold — restore one step
-                    new_pl = min(ps["current"] + args.power_step, ps["default"])
-                    print(f"GPU {gpu_id} cooled to {temp}C. "
-                          f"Restoring power limit: {ps['current']:.0f}W -> {new_pl:.0f}W")
-                    set_power_limit(gpu_id, new_pl, verbose=args.verbose)
-                    ps["current"] = new_pl
 
             elapsed = time.time() - start_time
             if elapsed < args.interval:
                 time.sleep(args.interval - elapsed)
     finally:
-        # Restore default power limits and release fan control
         for gpu_id in gpu_to_fans:
-            ps = power_state[gpu_id]
-            if ps["current"] < ps["default"]:
-                print(f"Restoring GPU {gpu_id} power limit to {ps['default']:.0f}W")
-                set_power_limit(gpu_id, ps["default"], verbose=args.verbose)
             release_fan_control(gpu_id, verbose=args.verbose)
             print(f"Released fan speed control for GPU {gpu_id}")
 
